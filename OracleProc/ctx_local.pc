@@ -1,0 +1,251 @@
+/*
+ * Name:        Thread_example1.pc
+ *
+ * Description: This program illustrates how to use threading in
+ *      conjunction with precompilers. The program creates as many
+ *      sessions as there are threads. Each thread executes zero or
+ *      more transactions, that are specified in a transient
+ *      structure called 'records'.
+ * Requirements:
+ *      The program requires a table 'ACCOUNTS' to be in the schema
+ *      scott/tiger. The description of ACCOUNTS is:
+ *  SQL> desc accounts
+ *   Name                            Null?    Type
+ *  ------------------------------- -------  ------
+ *  ACCOUNT                                  NUMBER(36)
+ *  BALANCE                                  NUMBER(36,2)
+ *
+ *  For proper execution, the table should be filled with the accounts
+ *      10001 to 10008.
+ *
+ *
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sqlca.h>
+
+#define      _EXC_OS_        _EXC__UNIX
+#define      _CMA_OS_        _CMA__UNIX
+
+#include <pthread.h>
+
+#define CONNINFO "test/test"
+#define THREADS  3 
+
+struct parameters 
+{ sql_context * ctx;
+  int thread_id;
+};
+typedef struct parameters parameters;
+
+struct record_log
+{  char action;
+   unsigned int from_account;
+   unsigned int to_account;
+   float  amount;
+};
+typedef struct record_log record_log;
+
+record_log records[]= { { 'M', 10001, 10002, 12.50 },
+                        { 'M', 10001, 10003, 25.00 },
+                        { 'M', 10001, 10003, 123.00 },
+                        { 'M', 10001, 10003, 125.00 },
+                        { 'M', 10002, 10006, 12.23 },
+                        { 'M', 10007, 10008, 225.23 },
+                        { 'M', 10002, 10008, 0.70 },
+                        { 'M', 10001, 10003, 11.30 },
+                        { 'M', 10003, 10002, 47.50 },
+                        { 'M', 10002, 10006, 125.00 },
+                        { 'M', 10007, 10008, 225.00 },
+                        { 'M', 10002, 10008, 0.70 },
+                        { 'M', 10001, 10003, 11.00 },
+                        { 'M', 10003, 10002, 47.50 },
+                        { 'M', 10002, 10006, 125.00 },
+                        { 'M', 10007, 10008, 225.00 },
+                        { 'M', 10002, 10008, 0.70 },
+                        { 'M', 10001, 10003, 11.00 },
+                        { 'M', 10003, 10002, 47.50 },
+                        { 'M', 10008, 10001, 1034.54}};
+
+static unsigned int trx_nr=0;
+pthread_mutex_t mutex;
+
+/* Function prototypes */
+void      err_report();
+void   	*do_transaction(void*);
+void 	get_transaction(record_log** trx);
+void      logon(sql_context ctx, char* connect_info);
+void      logoff(sql_context ctx);
+
+/*********************************************************************
+ *  Main
+ ********************************************************************/
+main()
+{
+  sql_context ctx[THREADS];
+  pthread_t thread_id[THREADS];
+  parameters params[THREADS];
+  int i;
+  
+  EXEC SQL ENABLE THREADS;
+
+  EXEC SQL WHENEVER SQLERROR DO err_report(sqlca);
+
+  /* Create THREADS sessions by connecting THREADS times */
+  for(i=0;i<THREADS;i++)
+  {
+    printf("Start Session %d....",i);
+    EXEC SQL CONTEXT ALLOCATE :ctx[i];
+    logon(ctx[i],CONNINFO);
+  }
+
+  /*Create mutex for transaction retrieval */
+  if (pthread_mutex_init(&mutex, NULL))
+  {
+     printf("Can't initialize mutex\n");
+     exit(1);
+  }
+
+  /*Spawn threads*/
+  for(i=0;i<THREADS;i++)
+  {
+    params[i].ctx=ctx[i];
+    params[i].thread_id=i;
+
+    printf("Thread %d... ",i);
+    if (pthread_create(&thread_id[i], NULL,
+        do_transaction, &params[i]))
+      printf("Cant create thread %d\n",i);
+    else
+      printf("Created\n");
+  }
+
+
+  /* Logoff sessions....*/
+  for(i=0;i<THREADS;i++)
+  {
+     /*wait for thread to end */
+     printf("Thread %d ....",i);
+     if (pthread_join(thread_id[i], NULL))
+       printf("Error when waiting for thread % to terminate\n", i);
+     else
+      printf("stopped\n");
+
+     printf("Stop Session %d....",i);
+     logoff(ctx[i]);
+     EXEC SQL CONTEXT FREE :ctx[i];
+  }
+
+
+  /*Destroys mutex*/
+  if (pthread_mutex_destroy(&mutex))
+  {
+    printf("Can't destroy mutex\n");
+    exit(1);
+  }
+}
+
+/*********************************************************************
+ * Function: do_transaction
+ *
+ * Description:  This functions executes one transaction out of the 
+ *               records array. The records array is 'managed' by
+ *               the get_transaction function.
+ *
+ *
+ ********************************************************************/
+void* do_transaction(void* generic_params)
+{
+  record_log *trx;
+  parameters* params = (parameters*) generic_params;
+  sql_context ctx=params->ctx;
+
+  /* Done all transactions ? */
+  while (trx_nr < (sizeof(records)/sizeof(record_log)))
+  {
+    get_transaction(&trx);
+
+    EXEC SQL WHENEVER SQLERROR DO err_report(sqlca);
+    EXEC SQL CONTEXT USE :ctx;
+
+    printf("Thread %d executing transaction\n",params->thread_id);
+    switch(trx->action)
+    {
+      case 'M':  EXEC SQL UPDATE ACCOUNTS
+                          SET    BALANCE=BALANCE+:trx->amount
+                          WHERE  ACCOUNT=:trx->to_account;
+                 EXEC SQL UPDATE ACCOUNTS
+                          SET    BALANCE=BALANCE-:trx->amount
+                          WHERE  ACCOUNT=:trx->from_account;
+                 break;
+       default:  break;
+    }
+    EXEC SQL COMMIT;
+  }
+
+  return 0;
+}
+
+
+/*****************************************************************
+ * Function: err_report
+ *
+ * Description: This routine prints out the most recent error
+ *
+ ****************************************************************/
+void      err_report()
+{
+  if (sqlca.sqlcode < 0)
+   printf("\n%.*s\n\n",sqlca.sqlerrm.sqlerrml,sqlca.sqlerrm.sqlerrmc);
+  exit(1);
+}
+
+/*****************************************************************
+ * Function: logon
+ *
+ * Description: Logs on to the database as USERNAME/PASSWORD
+ *
+ *****************************************************************/
+void      logon(sql_context ctx1, char* connect_info)
+{
+    EXEC SQL WHENEVER SQLERROR DO err_report(sqlca);
+    EXEC SQL CONTEXT USE :ctx1;
+    EXEC SQL CONNECT :connect_info;
+    printf("Connected!\n");
+}
+
+/******************************************************************
+ * Function: logoff
+ *
+ * Description: This routine logs off the database
+ *
+ ******************************************************************/
+void      logoff(sql_context ctx)
+{
+    EXEC SQL WHENEVER SQLERROR DO err_report(sqlca);
+    EXEC SQL CONTEXT USE :ctx;
+    EXEC SQL COMMIT WORK RELEASE;
+    printf("Logged off!\n");
+}
+
+
+/******************************************************************
+ * Function: get_transaction
+ *
+ * Description: This routine returns the next transaction to process
+ *
+ ******************************************************************/
+void get_transaction(record_log** trx)
+{
+  if (pthread_mutex_lock(&mutex))
+    printf("Can't lock mutex\n");
+
+  *trx=&records[trx_nr];
+
+  trx_nr++;
+
+  if (pthread_mutex_unlock(&mutex))
+    printf("Can't unlock mutex\n");
+}
