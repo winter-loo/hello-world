@@ -1,0 +1,23 @@
+/*
+ * Compile:
+ *
+ *  proc iname=hello.pc
+ *  gcc hello.c -o hello -L$ORACLE_HOME/lib -lclntsh -lpthread -ldl -lm -lecpg
+ *  
+ */
+#include <stdio.h>
+#include <sqlca.h>
+
+int main()
+{
+    char temp_char[32];
+    char* username = "test";
+    char* password = "test";
+
+    EXEC SQL CONNECT :username IDENTIFIED BY :password;
+    EXEC SQL SELECT 'hello world' INTO :temp_char FROM DUAL;
+
+    printf("%s\n", temp_char);
+
+    return 0;
+}
